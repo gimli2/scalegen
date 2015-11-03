@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Scale generator</title>
+    <meta http-equiv="content-type" content="text/html; charset=utf-8">
+    <meta name="author" content="Gimli2; http://gimli2.gipix.net" />
+    <meta name="description" content="ScaleGen - raster image scale generator. ScaleGen helps you to create scale for your microscope/map/science images." />
+    <meta name="keywords" content="scale, generator, scale generator, image scale" />
+    <style>
+      /* probably would be nicer in separete file but "one file" idea is stronger ;-) */
+      html {margin: 0; padding: 0; font-size: 16pt; font-family: sans-serif;}
+      body {margin: 0px;}
+      h1 {font-size: 120%;}
+      .fail { background: #c00; padding: 2px; color: #fff; }
+      .hidden { display: none !important;}
+      .numinput, input{width: 8ex;font-size: 16pt;}
+      .btn {width: 100%; padding: 0.5ex;}
+      .hint {font-size: 11pt;}
+      #holder { margin: 0; background: #666666; overflow: hidden;}
+      #holder.hover, #canvas.hover { background: #cc0000; }
+      #holder img { display: block; margin: 0; }
+      #canvas, #outcanvas {background: #333333;}
+      #outputwrap{overflow: auto;}
+      #ftext {width: 8ex;}
+      #menu {
+        background: #AAAAAA;
+        position: fixed;
+        top: 0;
+        right: 0;
+        width: 240px;
+        border: 1px solid black;
+        padding: 5px;
+        overflow: hidden;
+      }
+    </style>
+    <!-- the only one exception from one file idea -->
+    <script src="jquery-2.1.1.min.js" type="text/javascript"></script>
+  </head>
+  <body>
+
+    <div id="holder">
+      <canvas id="canvas"></canvas>
+    </div>
+    <div id="menu">
+      <h1>Scale generator</h1>
+      <form>
+        <input type="text" name="ftext" id="ftext" value="1 μm" onChange="javascript:process();" /><span class="hint">scale text (μ)</span><br />
+        <input type="number" name="fw" id="fw" value="100" class="numinput" onChange="javascript:process();" /><abbr class="hint" title="Total width of the scale (black box).">px width</abbr><br />
+        <input type="number" name="fh" id="fh" value="50" class="numinput" onChange="javascript:process();" /><abbr class="hint" title="Total height of the scale (black box).">px height</abbr><br />
+        <input type="number" name="fiw" id="fiw" value="80" class="numinput" onChange="javascript:process();" /><span class="hint">strip width</span><br />
+        <input type="text" name="ffont" id="ffont" value="Arial" onChange="javascript:process();" /><span class="hint">font name</span><br />
+        <input type="text" name="ffc" id="ffc" value="#FFFFFF" onChange="javascript:process();" /><span class="hint">forecolor</span><br />
+        <input type="button" class="btn" value="Generate a scale" onClick="javascript:process();" />
+      </form>
+      <hr />Final scale: <br />
+      <div id="outputwrap">
+        <canvas id="outcanvas" class="hidden"></canvas>
+        <img src="" alt="final scale image" title="Generated scale" id="imgout" /><br />
+        <a href="#" id="cropImageLink" class="hint">download scale image</a>
+      </div>
+      <span class="hint">Use: Download link OR right click &#10145; save as... to save generated scale.</span>
+      <hr />
+      <span class="hint">&copy; <a href="http://gimli2.gipix.net">Gimli2</a></span>
+      <p id="upload" class="hidden">Drag &amp; drop not supported, but you can still upload via this input field:<br /><input type="file" /></p>
+      <p id="filereader">File API &amp; FileReader API not supported</p>
+      <p id="formdata">XHR2's FormData is not supported</p>
+    </div>
+    
+<script>
+/** define variables, constants...------------------------------------------- */
+  var holder = document.getElementById('holder'),
+    tests = {
+      filereader: typeof FileReader != 'undefined',
+      dnd: 'draggable' in document.createElement('span'),
+      formdata: !!window.FormData,
+    }, 
+    support = {
+      filereader: document.getElementById('filereader'),
+      formdata: document.getElementById('formdata'),
+    },
+    acceptedTypes = {
+      'image/png': true,
+      'image/jpeg': true,
+      'image/gif': true
+    },
+    fileupload = document.getElementById('upload'),
+    canvas = document.getElementById('canvas'),
+    ctx = canvas.getContext('2d'),
+    outcanvas = document.getElementById('outcanvas'),
+    outctx = outcanvas.getContext('2d'),
+    MAX_HEIGHT = 300,
+    MAX_WIDTH = 300,
+    FONT = 'Arial',
+    FORECOLOR = '#FFFFFF',
+    sx=0, sy=0, dx=0, dy=0,
+    totalRatio = 1,
+    measuring = false,
+    originalFilename = '',
+    originalImahe = {};
+
+/** INIT -------------------------------------------------------------------- */
+  $(document).ready(function(){
+    // set size of workspace
+    var ch = $('html')[0].clientHeight;
+    $('#holder').height(ch);
+    $('#menu').height(ch);
+    canvas.width = $('#holder')[0].offsetWidth - 250;
+    canvas.height = ch;
+    MAX_WIDTH = canvas.width;
+    MAX_HEIGHT = canvas.height;
+
+    // print initial info
+    ctx = canvas.getContext('2d');
+    ctx.font = '30px '+FONT;
+    ctx.fillStyle = '#FFFFFF';
+    ctx.textAlign = 'center';
+    ctx.fillText('Drag image here...', canvas.width/2, canvas.height/2);
+    ctx.font = '20px '+FONT;
+    ctx.fillText('Next use a mouse to measure parts of the image.', canvas.width/2, canvas.height/2 + 50);
+    var i=0, types=[];
+    for(var propertyName in acceptedTypes) {
+     types[i++] = propertyName.replace('image/','');
+    }
+    ctx.fillText('Supported file types: '+types.join(', '), canvas.width/2, canvas.height/2 + 70);
+
+    // get content of canvas for use as BG while drawing measurement line
+    originalImage = ctx.getImageData(0, 0,ctx.canvas.width, ctx.canvas.height);
+
+    'filereader formdata'.split(' ').forEach(function (api) {
+      if (tests[api] === false) {
+        support[api].className = 'fail';
+      } else {
+        // FFS. I could have done el.hidden = true, but IE doesn't support
+        // hidden, so I tried to create a polyfill that would extend the
+        // Element.prototype, but then IE10 doesn't even give me access
+        // to the Element object. Brilliant.
+        support[api].className = 'hidden';
+      }
+    });
+
+    if (tests.dnd) {
+      holder.ondragover = function () { this.className = 'hover'; return false; };
+      holder.ondragend = function () { this.className = ''; return false; };
+      holder.ondrop = function (e) {
+        this.className = '';
+        e.preventDefault();
+        readfiles(e.dataTransfer.files);
+      }
+    } else {
+      fileupload.className = 'hidden';
+      fileupload.querySelector('input').onchange = function () {
+        readfiles(this.files);
+      };
+    }
+  });
+/** Generates a scale ------------------------------------------------------- */
+  function process() {
+    createScale();
+    return false;
+  }
+/** Handle one dragged file, create preview --------------------------------- */
+  function previewfile(file) {
+    if (tests.filereader === true && acceptedTypes[file.type] === true) {
+      var reader = new FileReader();
+      reader.onload = function (event) {
+        var img = new Image();
+        img.src = event.target.result;
+        // when image is loaded
+        img.onload = function () {
+          console.log(file.name + ' ' + (file.size ? (file.size/1024|0) + 'K' : ''));
+          originalFilename = file.name;
+          var width = img.width;
+          var height = img.height;
+          // adjust size to fit
+          if (width > MAX_WIDTH) {
+            height *= MAX_WIDTH / width;
+            width = MAX_WIDTH;
+            totalRatio = (MAX_WIDTH / width);
+          }
+          if (height > MAX_HEIGHT) {
+            width *= MAX_HEIGHT / height;
+            height = MAX_HEIGHT;
+            totalRatio *= (MAX_HEIGHT / height);
+          }
+          console.log('w: '+width+' h: '+height+ ' totalRatio='+totalRatio);
+          canvas.width = width;
+          canvas.height = height;
+          ctx.drawImage(img, 0, 0, width, height);
+          // save BG for drawing measurement line
+          originalImage = ctx.getImageData(0, 0, width, height);
+        };
+      };
+      // start reading file
+      reader.readAsDataURL(file);
+    } else {
+      holder.innerHTML += '<p>Uploaded ' + file.name + ' ' + (file.size ? (file.size/1024|0) + 'K' : '');
+      console.log(file);
+    }
+  }
+/** Proces dragged files ---------------------------------------------------- */
+  function readfiles(files) {
+    //debugger;
+    var formData = tests.formdata ? new FormData() : null;
+    for (var i = 0; i < files.length; i++) {
+      if (tests.formdata) formData.append('file', files[i]);
+      previewfile(files[i]);
+    }
+  }
+/** Draw a measurement line with label -------------------------------------- */
+  function drawLine(sx, sy, dx, dy, color) {
+    ctx.beginPath();
+    ctx.moveTo(sx, sy);
+    ctx.lineTo(dx, dy);
+    ctx.lineWidth = 10;
+    ctx.strokeStyle = color;
+    ctx.stroke();
+    ctx.fillStyle = color;
+    ctx.fill();
+
+    // compute length with respect to original size of a fitted image
+    var l = Math.round(Math.sqrt((sx-dx)*(sx-dx) + (sy-dy)*(sy-dy)) / totalRatio);
+    var offsetX = (sx > dx) ? -55 : 5;
+
+    // label background
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(dx+offsetX-3, dy+5, 55, -20);
+
+    // label
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.font = '15px '+FONT;
+    ctx.textAlign = 'left';
+    ctx.fillText(l+' px', dx+offsetX, dy);
+  }
+/** Draw a final scale to its canvas ---------------------------------------- */
+  function createScale() {
+    var scaleHeight = $('#fh').val()*1;
+    var scaleWidth = $('#fw').val()*1;
+    var innerWidth = $('#fiw').val()*1;
+    var text = $('#ftext').val();
+    FONT = $('#ffont').val();
+    FORECOLOR = $('#ffc').val();
+    outcanvas.width = scaleWidth;
+    outcanvas.height = scaleHeight;
+    outctx.fillStyle = '#000000';
+    outctx.fillRect(0, 0, scaleWidth, scaleHeight);
+    outctx.fillStyle = FORECOLOR;
+    var ix = Math.round((scaleWidth - innerWidth)/2);
+    outctx.fillRect(ix, Math.round(scaleHeight*2/3), (innerWidth), Math.round(scaleHeight*1/6));
+    // find maximal size of a font for our label
+    for(var fontsize=1; fontsize<300; fontsize++) {
+      outctx.font = fontsize+'px '+FONT;
+      //console.log('text size: ', outctx.measureText(text).width);
+      var tw = outctx.measureText(text).width;
+      var th = fontsize;
+      if ((th > (scaleHeight/3)) || (tw > innerWidth)) {
+        fontsize--;
+        break;
+      }
+    }
+    outctx.font = fontsize+'px '+FONT;
+    outctx.fillStyle = FORECOLOR;
+    outctx.textAlign = 'center';
+    outctx.fillText(text, scaleWidth/2, scaleHeight/2);
+
+    var dataURL = outcanvas.toDataURL('image/png');
+    document.getElementById('imgout').src = dataURL;
+
+    var link = document.getElementById('cropImageLink');
+    link.setAttribute('download', originalFilename+'_scale.png');
+    link.setAttribute('href', dataURL);//dataURL.replace('image/png', 'image/octet-stream'));
+  }
+/** Register callbacks for interaction -------------------------------------- */
+$('#canvas').on('mousemove', function(e){
+  if (measuring) {
+    dx = (e.offsetX || e.pageX - $(e.target).offset().left);
+    dy = (e.offsetY || e.pageY - $(e.target).offset().top);
+    var l = Math.round(Math.sqrt((sx-dx)*(sx-dx) + (sy-dy)*(sy-dy)) / totalRatio);
+    ctx.putImageData(originalImage, 0, 0);
+    drawLine(sx, sy, dx, dy, '#00FF00');
+
+    var scaleHeight = $('#fh').val();
+    $('#fiw').val(l);
+    $('#fw').val(Math.round(l + ((scaleHeight/6) * 2))); // padding (1/6 of height) + lenth + padding
+  }
+});
+$('#canvas').on('mousedown', function(e){
+  measuring = !measuring;
+  if (measuring) {
+    sx = (e.offsetX || e.pageX - $(e.target).offset().left);
+    sy = (e.offsetY || e.pageY - $(e.target).offset().top);
+  }
+});
+$('#canvas').on('mouseup', function(e){
+  measuring = !measuring;
+  process();
+  createScale();
+});
+/** ------------------------------------------------------------------------- */
+</script>
+
+ 
+
+  </body>
+</html>
