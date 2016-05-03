@@ -50,6 +50,7 @@
         <input type="number" name="fiw" id="fiw" value="80" class="numinput" onChange="javascript:process();" /><span class="hint">strip width</span><br />
         <input type="text" name="ffont" id="ffont" value="Arial" onChange="javascript:process();" /><span class="hint">font name</span><br />
         <input type="text" name="ffc" id="ffc" value="#FFFFFF" onChange="javascript:process();" /><span class="hint">forecolor</span><br />
+        <input type="checkbox" name="fato" id="fato" onChange="javascript:process();" /><span class="hint">allow text to overflow strip width</span><br />
         <input type="button" class="btn" value="Generate a scale" onClick="javascript:process();" />
       </form>
       <hr />Final scale: <br />
@@ -171,16 +172,18 @@
           originalFilename = file.name;
           var width = img.width;
           var height = img.height;
+          console.log('maximum viewport size: w: '+MAX_WIDTH+' h: '+MAX_HEIGHT);
+          console.log('original image size: w: '+width+' h: '+height);
           // adjust size to fit
           if (width > MAX_WIDTH) {
             height *= MAX_WIDTH / width;
-            width = MAX_WIDTH;
             totalRatio = (MAX_WIDTH / width);
+            width = MAX_WIDTH;
           }
           if (height > MAX_HEIGHT) {
             width *= MAX_HEIGHT / height;
-            height = MAX_HEIGHT;
             totalRatio *= (MAX_HEIGHT / height);
+            height = MAX_HEIGHT;
           }
           console.log('w: '+width+' h: '+height+ ' totalRatio='+totalRatio);
           canvas.width = width;
@@ -238,6 +241,7 @@
     var scaleWidth = $('#fw').val()*1;
     var innerWidth = $('#fiw').val()*1;
     var text = $('#ftext').val();
+    var allowTextOverflow = $('#fato').is(':checked');
     FONT = $('#ffont').val();
     FORECOLOR = $('#ffc').val();
     outcanvas.width = scaleWidth;
@@ -247,17 +251,22 @@
     outctx.fillStyle = FORECOLOR;
     var ix = Math.round((scaleWidth - innerWidth)/2);
     outctx.fillRect(ix, Math.round(scaleHeight*2/3), (innerWidth), Math.round(scaleHeight*1/6));
-    // find maximal size of a font for our label
+    
+    // Find maximal size of a font for our label. We want to preserve font size for scales with
+    // or without "μ" sign. So estimate font size with symbol "μ" artificially placed to the text.
+    // And don't forget to use alse some char with full height, eg. "1" and preserve length of text.
+    var sampleText = "1μ"+text.substring(2);
     for(var fontsize=1; fontsize<300; fontsize++) {
       outctx.font = fontsize+'px '+FONT;
       //console.log('text size: ', outctx.measureText(text).width);
-      var tw = outctx.measureText(text).width;
+      var tw = outctx.measureText(sampleText).width;
       var th = fontsize;
-      if ((th > (scaleHeight/3)) || (tw > innerWidth)) {
+      if ((th > (scaleHeight/3)) || (!allowTextOverflow && tw > innerWidth)) {
         fontsize--;
         break;
       }
     }
+    
     outctx.font = fontsize+'px '+FONT;
     outctx.fillStyle = FORECOLOR;
     outctx.textAlign = 'center';
